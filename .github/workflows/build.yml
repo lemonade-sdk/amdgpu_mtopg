@@ -1,0 +1,31 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the app (ad-hoc signed)
+        run: ./build.sh --clean
+
+      - name: Check the gpu_metrics layouts and the Linux-path model
+        run: ./check_linux_model.sh third_party/kgd_pp_interface.h
+
+      - name: Check the generated layouts match the vendored header
+        run: |
+          python3 gen_gpu_metrics.py third_party/kgd_pp_interface.h
+          git diff --exit-code -- Sources/GPUMetricsLayout.swift
+
+      - name: Package the unsigned build
+        run: ditto -c -k --keepParent build/amdgpu_mtopg.app build/amdgpu_mtopg-adhoc.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amdgpu_mtopg-adhoc
+          path: build/amdgpu_mtopg-adhoc.zip
