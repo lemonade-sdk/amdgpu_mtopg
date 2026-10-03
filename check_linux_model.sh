@@ -95,7 +95,10 @@ precondition(snap.sensors.first?.label == "Temp edge" && snap.sensors.first?.val
 precondition(snap.sensors.contains { $0.label == "Power avg" && $0.text == "123 W / 300 W cap" })
 precondition(snap.deviceLine == "1002:7551" && snap.linkLine == "PCIe 16.0 GT/s PCIe x16")
 // Eight GRBM samples, six active: 75% from hardware sampling.
-s.grbm = (0..<8).map { (now - 1_000_000 + UInt64($0) * 10_000, $0 % 4 != 0) }
+let grbmStart: UInt64 = now - 1_000_000
+s.grbm = (0..<8).map { (i: Int) -> (atNs: UInt64, active: Bool) in
+    (atNs: grbmStart + UInt64(i) * 10_000, active: i % 4 != 0)
+}
 now += 2_000_000
 history.add(s, nowNs: now)
 snap = makeLinuxSnapshot(s, history: history, nowNs: now)
