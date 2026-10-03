@@ -10,6 +10,16 @@
   <a href="https://github.com/lemonade-sdk/amdgpu_mtopg/releases"><img src="https://img.shields.io/github/downloads/lemonade-sdk/amdgpu_mtopg/total" alt="downloads"></a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/lemonade-sdk/mac_linuxgpu">mac_linuxgpu</a> ·
+  <b>amdgpu_mtopg</b> ·
+  <a href="https://github.com/Geramy/LSE">LemonSeed Engine</a>
+</p>
+
+![amdgpu_mtopg monitoring an AMD Radeon AI PRO R9700 on macOS](assets/screenshot.png)
+
+<p align="center"><sub>An AMD Radeon AI PRO R9700 over Thunderbolt 5 on an Apple M5 Max, running <a href="https://github.com/lemonade-sdk/mac_linuxgpu">mac_linuxgpu</a>, while <a href="https://github.com/Geramy/LSE">LemonSeed Engine</a> runs Qwen3.8-27B inference.</sub></p>
+
 A live GPU monitor for AMD GPUs on macOS. A native SwiftUI app with rolling
 charts for GPU load and memory activity, and readouts for VRAM, clocks,
 sensors, throttling and the PCIe link.
@@ -269,6 +279,17 @@ driver headers. The IOKit iterator and connections are released on exit.
 |---|---|
 | `MTOPG_NO_GRBM=1` | mac_linuxgpu: do not sample `GRBM_STATUS`; GPU load falls back to `gpu_busy_percent` |
 | `MTOPG_DEBUG=1` | log one line per refresh to stderr: each device, its driver and its read status |
+
+## Related projects
+
+- **[mac_linuxgpu](https://github.com/lemonade-sdk/mac_linuxgpu):** the
+  unmodified upstream Linux `amdgpu` + `amdkfd` driver running on macOS in a
+  DriverKit extension. It provides the telemetry this monitor reads.
+- **[LemonSeed Engine](https://github.com/Geramy/LSE):** LLM inference on AMD
+  GPUs through HRX/Loom. It runs on mac_linuxgpu, and its HumanEval+ results
+  on the R9700 are below.
+
+![LemonSeed Engine HumanEval+ on AMD R9700](https://raw.githubusercontent.com/Geramy/LSE/master/docs/benchmarks/flashprefill-humaneval-32k.png)
 
 ## License
 
