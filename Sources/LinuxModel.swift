@@ -41,10 +41,85 @@ struct LinuxSensorRow: Identifiable {
     let source: String
 }
 
+/// One output of the GPU and the monitor on it, as the dext publishes it
+/// (MacLinuxGPUDisplays): DRM connector state from upstream DC, the monitor
+/// name from its EDID.
+struct LinuxDisplayRow: Identifiable {
+    let id: Int
+    let connector: String          // "DP-4"
+    let connected: Bool
+    let monitor: String?           // "DELL UP2716D"
+    let mode: String?              // what the GPU scans out, or the monitor's preferred mode
+    let driven: Bool               // the GPU is scanning out to it
+}
+
+/// What the dext publishes on its IOService beside System Information's
+/// keys (mac_linuxgpu dext/sources/device_identity.h): MacLinuxGPUDevice and
+/// MacLinuxGPUDisplays. Read from the IORegistry, no observer call; nil
+/// fields are values the driver did not publish.
+struct LinuxRegistryInfo {
+    var name: String?
+    var vendorID: Int?
+    var deviceID: Int?
+    var revisionID: Int?
+    var vramBytes: UInt64?
+    var vramType: String?
+    var gfxTarget: String?
+    var vbios: String?
+    var displays: [LinuxDisplayRow]?   // nil: not published (no display client, or DC off)
+
+    init?(device: [String: Any]?, displays: [String: Any]?) {
+        guard let device else { return nil }
+        func int(_ d: [String: Any], _ k: String) -> Int? { (d[k] as? NSNumber)?.intValue }
+        func text(_ d: [String: Any], _ k: String) -> String? {
+            (d[k] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        name = text(device, "Name")
+        vendorID = int(device, "VendorID")
+        deviceID = int(device, "DeviceID")
+        revisionID = int(device, "RevisionID")
+        vramBytes = (device["VRAMBytes"] as? NSNumber)?.uint64Value
+        vramType = text(device, "VRAMType")
+        gfxTarget = text(device, "GFXTarget")
+        vbios = text(device, "VBIOSPartNumber")
+        if let displays {
+            let list = displays["Connectors"] as? [[String: Any]] ?? []
+            self.displays = list.enumerated().compactMap { i, c in
+                guard let connector = text(c, "Name") else { return nil }
+                let driven = (c["Lit"] as? Bool) ?? false
+                var mode: String?
+                let (w, h, r) = driven ? ("LitWidth", "LitHeight", "LitRefresh")
+                                       : ("PreferredWidth", "PreferredHeight", "PreferredRefresh")
+                if let width = int(c, w), let height = int(c, h) {
+                    mode = "\(width)x\(height)" + (int(c, r).map { $0 > 0 ? "@\($0)" : "" } ?? "")
+                }
+                return LinuxDisplayRow(id: i, connector: connector,
+                                       connected: text(c, "Status") == "connected",
+                                       monitor: text(c, "Monitor"), mode: mode, driven: driven)
+            }
+        }
+    }
+
+    /// "AMD Radeon AI Pro R9700 · 32 GiB GDDR6 · gfx1201"
+    var headline: String? {
+        var parts: [String] = []
+        if let name { parts.append(name) }
+        if let vramBytes, vramBytes > 0 {
+            let gib = Double(vramBytes) / 1_073_741_824.0
+            parts.append((gib == gib.rounded() ? "\(Int(gib)) GiB" : String(format: "%.1f GiB", gib)) +
+                         (vramType.map { " \($0)" } ?? ""))
+        }
+        if let gfxTarget { parts.append(gfxTarget) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
 struct LinuxSnapshot {
     var status: String = ""
     var statusOK = false
     var deviceLine: String = ""
+    var deviceName: String?            // the dext's published identity headline
+    var displays: [LinuxDisplayRow]?   // the monitors on the GPU's outputs
     var linkLine: String = ""
     var perfLevel: String?
     var metricsFormat: String = "gpu_metrics: not read"
@@ -156,6 +231,10 @@ private func errnoText(_ e: Int32) -> String { "\(String(cString: strerror(e))) 
 func makeLinuxSnapshot(_ s: LinuxSample, history: LinuxHistory, nowNs: UInt64) -> LinuxSnapshot {
     var snap = LinuxSnapshot()
     snap.build = s.compiledBuild
+    // The dext's published identity and monitors: known even while no
+    // session runs (the name from the PCI IDs, the rest after the probe).
+    snap.deviceName = s.registry?.headline
+    snap.displays = s.registry?.displays
     if let e = s.error {
         snap.status = e
         return snap

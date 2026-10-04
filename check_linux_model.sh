@@ -110,7 +110,26 @@ idle.modulesRunning = false
 history.add(idle, nowNs: now)
 snap = makeLinuxSnapshot(idle, history: history, nowNs: now)
 precondition(!snap.statusOK && snap.coreCurrent == nil && snap.status.hasPrefix("upstream amdgpu not running"))
-print("PASS MacLinuxGPU model: gpu_metrics v1.3 by header, pp_dpm parsing, snapshot sources and fallbacks")
+// The dext's published identity and monitors, shown even while idle.
+let device: [String: Any] = ["Name": "AMD Radeon AI Pro R9700", "VendorID": NSNumber(value: 0x1002),
+                             "DeviceID": NSNumber(value: 0x7551), "VRAMBytes": NSNumber(value: UInt64(32) << 30),
+                             "VRAMType": "GDDR6", "GFXTarget": "gfx1201", "VBIOSPartNumber": "113-EXAMPLE"]
+let outputs: [String: Any] = ["HotplugEpoch": NSNumber(value: 2), "Connectors": [
+    ["Name": "DP-4", "Status": "connected", "Monitor": "DELL UP2716D", "Lit": true,
+     "LitWidth": NSNumber(value: 2560), "LitHeight": NSNumber(value: 1440), "LitRefresh": NSNumber(value: 60)],
+    ["Name": "DP-5", "Status": "connected", "Lit": false,
+     "PreferredWidth": NSNumber(value: 1920), "PreferredHeight": NSNumber(value: 1080)],
+    ["Name": "HDMI-A-1", "Status": "disconnected", "Lit": false]] as [[String: Any]]]
+idle.registry = LinuxRegistryInfo(device: device, displays: outputs)
+snap = makeLinuxSnapshot(idle, history: history, nowNs: now)
+precondition(snap.deviceName == "AMD Radeon AI Pro R9700 · 32 GiB GDDR6 · gfx1201")
+precondition(snap.displays?.count == 3 && snap.displays?[0].monitor == "DELL UP2716D")
+precondition(snap.displays?[0].mode == "2560x1440@60" && snap.displays?[0].driven == true)
+precondition(snap.displays?[1].mode == "1920x1080" && snap.displays?[1].driven == false && snap.displays?[1].monitor == nil)
+precondition(snap.displays?[2].connected == false)
+precondition(LinuxRegistryInfo(device: nil, displays: outputs) == nil)
+precondition(LinuxRegistryInfo(device: ["VendorID": NSNumber(value: 0x1002)], displays: nil)?.displays == nil)
+print("PASS MacLinuxGPU model: gpu_metrics v1.3 by header, pp_dpm parsing, snapshot sources and fallbacks, published identity and displays")
 SWIFT
 
 xcrun swiftc -Onone -o "$work/check" "$work/main.swift" \
