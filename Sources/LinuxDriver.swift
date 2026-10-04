@@ -111,6 +111,9 @@ final class LinuxSample {
     var metrics: GPUMetrics?
     var hwmon: String?            // "hwmon/hwmonN"
     var hwmonFiles: Set<String> = []
+
+    // The dext's published identity and monitors (IORegistry properties).
+    var registry: LinuxRegistryInfo?
 }
 
 private extension Array where Element == UInt8 {

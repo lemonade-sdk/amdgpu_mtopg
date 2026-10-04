@@ -44,6 +44,7 @@ struct LinuxContentView: View {
             HStack(alignment: .top, spacing: 10) {
                 throttlePanel
                 pciePanel
+                displaysPanel
             }
             Spacer(minLength: 0)
             HStack {
@@ -72,6 +73,9 @@ struct LinuxContentView: View {
             Text("MacLinuxGPU")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Palette.accent)
+            if let name = linux.deviceName {
+                Text(name).font(body11).foregroundStyle(Palette.bright)
+            }
             if !linux.deviceLine.isEmpty {
                 Text(linux.deviceLine).font(body11).foregroundStyle(Palette.dim)
             }
@@ -183,6 +187,45 @@ struct LinuxContentView: View {
                 }
                 Text("bit names: SMU_THROTTLER_* (amdgpu_smu.h)")
                     .font(caption).foregroundStyle(Palette.dim)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// The monitors on the GPU's own outputs. macOS System Information lists
+    /// them under the Apple GPU (they reach macOS as virtual displays); this
+    /// is the GPU's side, from upstream DC's connectors.
+    private var displaysPanel: some View {
+        Panel(title: "Displays (GPU outputs)") {
+            VStack(alignment: .leading, spacing: 4) {
+                if let rows = linux.displays {
+                    let connected = rows.filter(\.connected)
+                    if connected.isEmpty {
+                        Text("no monitor connected").font(body11).foregroundStyle(Palette.dim)
+                    }
+                    ForEach(connected) { row in
+                        HStack {
+                            Text(row.connector).frame(width: 70, alignment: .leading).foregroundStyle(Palette.dim)
+                            Text(row.monitor ?? "monitor").foregroundStyle(Palette.bright)
+                            Spacer()
+                            if let mode = row.mode {
+                                Text(mode + (row.driven ? "" : " (not driven)"))
+                                    .foregroundStyle(row.driven ? Palette.umc : Palette.dim)
+                            }
+                        }
+                        .font(body11)
+                    }
+                    let idle = rows.filter { !$0.connected }.map(\.connector)
+                    if !idle.isEmpty {
+                        Text("unused: " + idle.joined(separator: ", "))
+                            .font(caption).foregroundStyle(Palette.dim).lineLimit(2)
+                    }
+                } else {
+                    Text("not reported (display agent not running, or Display Core off)")
+                        .font(body11).foregroundStyle(Palette.dim)
+                }
+                Text("source: the dext's MacLinuxGPUDisplays (DRM connectors, EDID monitor names)")
+                    .font(caption).foregroundStyle(Palette.dim).lineLimit(2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

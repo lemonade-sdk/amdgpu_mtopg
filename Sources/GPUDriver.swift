@@ -350,6 +350,12 @@ final class DriverTransport {
         linuxTransport.closeAll()
     }
 
+    /// A property the dext publishes on its service; no user client involved.
+    private func registryProperty(_ service: io_service_t, _ key: String) -> Any? {
+        IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue()
+    }
+
     private func krString(_ operation: String, _ kr: kern_return_t) -> String {
         String(format: "%s: 0x%08x", operation, kr)
     }
@@ -644,6 +650,9 @@ final class DriverTransport {
                 _ = IORegistryEntryGetRegistryEntryID(service, &device.registry)
                 live.insert(device.registry)
                 device.linux = linuxTransport.read(service, registry: device.registry)
+                device.linux?.registry = LinuxRegistryInfo(
+                    device: registryProperty(service, "MacLinuxGPUDevice") as? [String: Any],
+                    displays: registryProperty(service, "MacLinuxGPUDisplays") as? [String: Any])
                 IOObjectRelease(service)
                 devices.append(device)
             }
