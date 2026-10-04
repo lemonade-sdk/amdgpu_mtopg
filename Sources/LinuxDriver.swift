@@ -16,6 +16,7 @@
 
 import Foundation
 import IOKit
+import notify
 
 enum LinuxABI {
     static let observerClient: UInt32 = 1
@@ -28,6 +29,13 @@ enum LinuxABI {
     static let chunk = 4096
     static let pathMax = 256
     static let tagProbeStatus: UInt64 = 0x4c50524f   // "LPRO"
+    static let tagSessionState: UInt64 = 0x4c534553  // "LSES": cached session state
+    static let sessionStateWords = 9
+    static let flagStopping: UInt64 = 1 << 2         // MLG_SESSION_FLAG_STOPPING
+    static let flagRetiring: UInt64 = 1 << 12        // MLG_SESSION_FLAG_RETIRING
+    /// The MacLinuxGPU installer posts this before it retires a previous
+    /// driver instance (an upgrade); its state is that instance's registry ID.
+    static let retiringNotification = "com.geramyloveless.maclinuxgpu.driver-retiring"
     // include/uapi/drm/amdgpu_drm.h
     static let infoReadMMRReg: UInt64 = 0x15
     // SOC15 GC register layout (gc_*_offset.h regGRBM_STATUS, base index 0;
@@ -150,6 +158,37 @@ final class LinuxTransport {
     }
 
     private var connections: [UInt64: Connection] = [:]
+    /// Driver instances being replaced (an upgrade): no connection is kept
+    /// or opened to them, so they can leave; the new instance is used as
+    /// soon as it appears. A previous instance waits for every connected
+    /// app before it terminates, so a monitor that stays connected blocks
+    /// the upgrade.
+    private var retiring = Set<UInt64>()
+    private let retiringLock = NSLock()
+    private var retiringToken: Int32 = 0
+
+    init() {
+        notify_register_dispatch(LinuxABI.retiringNotification, &retiringToken, DispatchQueue.global(qos: .utility)) {
+            [weak self] token in
+            var state: UInt64 = 0
+            guard notify_get_state(token, &state) == NOTIFY_STATUS_OK, state != 0 else { return }
+            self?.markRetiring(state)
+        }
+    }
+
+    deinit { notify_cancel(retiringToken) }
+
+    private func markRetiring(_ registry: UInt64) {
+        retiringLock.lock()
+        retiring.insert(registry)
+        retiringLock.unlock()
+    }
+
+    private func isRetiring(_ registry: UInt64) -> Bool {
+        retiringLock.lock()
+        defer { retiringLock.unlock() }
+        return retiring.contains(registry)
+    }
     static let slowPeriodNs: UInt64 = 1_000_000_000
     static let grbmSamplesPerRefresh = 5
     static let grbmSpacingUs: UInt32 = 8_000
@@ -165,6 +204,10 @@ final class LinuxTransport {
             IOServiceClose(c.port)
             connections.removeValue(forKey: id)
         }
+        // An instance that is gone is no longer retiring.
+        retiringLock.lock()
+        retiring.formIntersection(live)
+        retiringLock.unlock()
     }
 
     // MARK: calls
@@ -250,6 +293,12 @@ final class LinuxTransport {
     // MARK: refresh
 
     func read(_ service: io_service_t, registry: UInt64) -> LinuxSample {
+        if isRetiring(registry) {
+            if let c = connections.removeValue(forKey: registry) { IOServiceClose(c.port) }
+            let s = LinuxSample()
+            s.error = "driver upgrade in progress: disconnected from the previous driver"
+            return s
+        }
         let c: Connection
         if let existing = connections[registry] {
             c = existing
@@ -283,6 +332,7 @@ final class LinuxTransport {
             if !readSlow(c, into: sample, at: now) {
                 IOServiceClose(c.port)
                 connections.removeValue(forKey: registry)
+                if sample.error?.hasPrefix("driver upgrade") == true { markRetiring(registry) }
                 return sample
             }
         }
@@ -322,8 +372,23 @@ final class LinuxTransport {
         return true
     }
 
+    /// Whether the instance is stopping or retiring for an upgrade (cached
+    /// session state; drivers before Retire report neither).
+    private func leaving(_ c: Connection) -> Bool {
+        var state = [UInt64](repeating: 0, count: LinuxABI.sessionStateWords)
+        var count = UInt32(LinuxABI.sessionStateWords)
+        var tag = LinuxABI.tagSessionState
+        let kr = IOConnectCallScalarMethod(c.port, LinuxABI.selQuery, &tag, 1, &state, &count)
+        guard kr == KERN_SUCCESS, count >= 2 else { return false }
+        return state[1] & (LinuxABI.flagRetiring | LinuxABI.flagStopping) != 0
+    }
+
     /// The ~1 Hz attributes. Returns false when the connection is dead.
     private func readSlow(_ c: Connection, into s: LinuxSample, at now: UInt64) -> Bool {
+        if leaving(c) {
+            s.error = "driver upgrade in progress: disconnected from the previous driver"
+            return false
+        }
         guard sessionState(c, into: s, probe: false) else { return false }
         s.slowAtNs = now
         s.notReady = false
