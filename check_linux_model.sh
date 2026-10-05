@@ -103,6 +103,19 @@ now += 2_000_000
 history.add(s, nowNs: now)
 snap = makeLinuxSnapshot(s, history: history, nowNs: now)
 precondition(snap.coreHardware && snap.coreCurrent == 75)
+// A bounded read that overran (timeout or busy) skips the sample: three
+// seconds on, the GRBM window and its 75% are still shown, then age out
+// once reads resume.
+s.grbm = []
+s.grbmSkipped = true
+now += 3_000_000_000
+history.add(s, nowNs: now)
+snap = makeLinuxSnapshot(s, history: history, nowNs: now)
+precondition(snap.coreHardware && snap.coreCurrent == 75)
+s.grbmSkipped = false
+history.add(s, nowNs: now)
+snap = makeLinuxSnapshot(s, history: history, nowNs: now)
+precondition(!snap.coreHardware && snap.coreCurrent == 88)
 // Not running: no values, an honest status.
 let idle = LinuxSample()
 idle.notReady = true
@@ -129,7 +142,7 @@ precondition(snap.displays?[1].mode == "1920x1080" && snap.displays?[1].driven =
 precondition(snap.displays?[2].connected == false)
 precondition(LinuxRegistryInfo(device: nil, displays: outputs) == nil)
 precondition(LinuxRegistryInfo(device: ["VendorID": NSNumber(value: 0x1002)], displays: nil)?.displays == nil)
-print("PASS MacLinuxGPU model: gpu_metrics v1.3 by header, pp_dpm parsing, snapshot sources and fallbacks, published identity and displays")
+print("PASS MacLinuxGPU model: gpu_metrics v1.3 by header, pp_dpm parsing, snapshot sources and fallbacks, skipped bounded reads, published identity and displays")
 SWIFT
 
 xcrun swiftc -Onone -o "$work/check" "$work/main.swift" \
