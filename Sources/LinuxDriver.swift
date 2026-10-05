@@ -9,6 +9,13 @@
 //     hwmon/hwmonN/*, gpu_metrics, ...), or a directory listing.
 //   - DrmInfo (selector 81): DRM_IOCTL_AMDGPU_INFO through upstream
 //     amdgpu_info_ioctl (READ_MMR_REG for GRBM_STATUS sampling).
+// Both are synchronous calls the dext bounds (build 243+): the read runs on
+// a driver thread and the call returns kIOReturnTimeout after 250 ms, or
+// kIOReturnBusy while an earlier read is still overrunning. Either one
+// skips the sample: the monitor keeps showing the last values it read and
+// tries again on the next refresh. Every other call the monitor makes
+// (RuntimeBuild, the cached QueryInfo tags LPRO and LSES) never sleeps in
+// the dext and is synchronous too, so none needs the async session call.
 // The observer client never claims PCI, joins the session or touches queues.
 // Both ABIs are defined in mac_linuxgpu dext/sources/session_state.h.
 //
@@ -47,6 +54,8 @@ enum LinuxABI {
 
 let kIOReturnNotReadyCode: kern_return_t = kern_return_t(bitPattern: 0xe00002d8)
 let kIOReturnNotPermittedCode: kern_return_t = kern_return_t(bitPattern: 0xe00002e2)
+let kIOReturnTimeoutCode: kern_return_t = kern_return_t(bitPattern: 0xe00002d6)
+let kIOReturnBusyCode: kern_return_t = kern_return_t(bitPattern: 0xe00002d5)
 
 // MARK: - gpu_metrics
 
@@ -111,6 +120,7 @@ final class LinuxSample {
     // Fast tier: GRBM_STATUS samples taken this refresh.
     var grbm: [(atNs: UInt64, active: Bool)] = []
     var grbmStatus: String?       // why sampling is unavailable
+    var grbmSkipped = false       // a bounded read overran: keep the last value
 
     // Slow tier (~1 Hz): text attributes by path, their errnos, gpu_metrics.
     var slowAtNs: UInt64 = 0
@@ -155,6 +165,13 @@ final class LinuxTransport {
         case notReady
         case unsupported
         case transport(kern_return_t)
+        case skipped               // the bounded read overran (timeout or busy)
+    }
+
+    /// A bounded read's overrun: kIOReturnTimeout, or kIOReturnBusy while an
+    /// earlier one is still running.
+    private static func overran(_ kr: kern_return_t) -> Bool {
+        kr == kIOReturnTimeoutCode || kr == kIOReturnBusyCode
     }
 
     private var connections: [UInt64: Connection] = [:]
@@ -256,6 +273,7 @@ final class LinuxTransport {
                                           outputWords: 3, outputBytes: LinuxABI.chunk)
             if kr == kIOReturnNotReadyCode { return .failure(.notReady) }
             if kr == kIOReturnNotPermittedCode { return .failure(.unsupported) }
+            if Self.overran(kr) { return .failure(.skipped) }
             guard kr == KERN_SUCCESS, words.count == 3 else { return .failure(.transport(kr)) }
             if let e = Self.linuxErrno(words[0]) { return .failure(.linux(e)) }
             guard words[1] == UInt64(chunk.count), chunk.count <= LinuxABI.chunk else {
@@ -284,6 +302,7 @@ final class LinuxTransport {
                                       outputWords: 1, outputBytes: size)
         if kr == kIOReturnNotReadyCode { return .failure(.notReady) }
         if kr == kIOReturnNotPermittedCode { return .failure(.unsupported) }
+        if Self.overran(kr) { return .failure(.skipped) }
         guard kr == KERN_SUCCESS, words.count == 1 else { return .failure(.transport(kr)) }
         if let e = Self.linuxErrno(words[0]) { return .failure(.linux(e)) }
         guard bytes.count == size else { return .failure(.transport(kIOReturnBadArgument)) }
@@ -390,6 +409,17 @@ final class LinuxTransport {
             return false
         }
         guard sessionState(c, into: s, probe: false) else { return false }
+        // The sample starts as a copy of the last one; a skipped read keeps
+        // that sample's values.
+        let previous = (slowAtNs: s.slowAtNs, notReady: s.notReady, unsupported: s.unsupported,
+                        text: s.text, errnos: s.errnos, metrics: s.metrics,
+                        modulesRunning: s.modulesRunning, probeResult: s.probeResult)
+        func keepPrevious() -> Bool {
+            (s.slowAtNs, s.notReady, s.unsupported) = (previous.slowAtNs, previous.notReady, previous.unsupported)
+            (s.text, s.errnos, s.metrics) = (previous.text, previous.errnos, previous.metrics)
+            (s.modulesRunning, s.probeResult) = (previous.modulesRunning, previous.probeResult)
+            return true
+        }
         s.slowAtNs = now
         s.notReady = false
         s.unsupported = false
@@ -398,6 +428,8 @@ final class LinuxTransport {
         s.metrics = nil
         if !c.discovered {
             switch discover(c) {
+            case .failure(.skipped):
+                return keepPrevious()
             case .failure(.notReady):
                 s.notReady = true
                 return sessionState(c, into: s, probe: true)
@@ -428,6 +460,9 @@ final class LinuxTransport {
             case .failure(.unsupported):
                 s.unsupported = true
                 return true
+            case .failure(.skipped):
+                // The rest of this tier would only wait behind the overrun.
+                return keepPrevious()
             case .failure(.transport(let kr)):
                 if Self.lost(kr) {
                     s.error = String(format: "observer connection lost: 0x%08x", kr)
@@ -438,8 +473,10 @@ final class LinuxTransport {
         }
         s.modulesRunning = true
         s.probeResult = nil
-        if case .success(let bytes) = sysfs(c, "gpu_metrics") {
-            s.metrics = GPUMetrics(bytes: bytes)
+        switch sysfs(c, "gpu_metrics") {
+        case .success(let bytes): s.metrics = GPUMetrics(bytes: bytes)
+        case .failure(.skipped): s.metrics = previous.metrics
+        case .failure: break
         }
         return true
     }
@@ -455,12 +492,15 @@ final class LinuxTransport {
         case .success(let entries):
             if let dir = entries.first(where: { $0.kind == "d" && $0.name.hasPrefix("hwmon") }) {
                 c.hwmon = "hwmon/\(dir.name)"
-                if case .success(let files) = list(c, "hwmon/\(dir.name)") {
-                    c.hwmonFiles = Set(files.filter { $0.kind == "f" }.map(\.name))
+                switch list(c, "hwmon/\(dir.name)") {
+                case .success(let files): c.hwmonFiles = Set(files.filter { $0.kind == "f" }.map(\.name))
+                case .failure(.skipped): return .failure(.skipped)
+                case .failure: break
                 }
             }
         case .failure(.notReady): return .failure(.notReady)
         case .failure(.unsupported): return .failure(.unsupported)
+        case .failure(.skipped): return .failure(.skipped)
         case .failure: break
         }
         switch sysfs(c, "ip_discovery/die/0/GC/0/base_addr") {
@@ -471,6 +511,8 @@ final class LinuxTransport {
             } else {
                 c.grbmUnavailable = "ip_discovery GC base_addr unreadable"
             }
+        case .failure(.skipped):
+            return .failure(.skipped)
         case .failure(.linux(let e)):
             c.grbmUnavailable = "ip_discovery GC base_addr: \(String(cString: strerror(e)))"
         case .failure(let e):
@@ -505,6 +547,9 @@ final class LinuxTransport {
                 c.grbmOffset = nil
                 c.grbmUnavailable = "driver has no DrmInfo selector"
                 s.grbmStatus = c.grbmUnavailable
+                return
+            case .failure(.skipped):
+                s.grbmSkipped = true
                 return
             case .failure(let e):
                 s.grbmStatus = "GRBM_STATUS read failed: \(e)"

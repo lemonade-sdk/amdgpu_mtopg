@@ -172,7 +172,11 @@ final class LinuxHistory {
         for sample in s.grbm where grbm.last.map({ $0.atNs < sample.atNs }) ?? true {
             grbm.append(sample)
         }
-        grbm.removeAll { now < $0.atNs || now - $0.atNs > grbmWindowNs }
+        // A skipped GRBM read (the driver's bounded read overran) keeps the
+        // window, and so the value, it had; it ages again once reads resume.
+        if !s.grbmSkipped {
+            grbm.removeAll { now < $0.atNs || now - $0.atNs > grbmWindowNs }
+        }
         var core: Double?
         coreFromGRBM = false
         if grbm.count >= 8 {
